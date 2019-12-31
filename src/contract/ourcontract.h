@@ -39,4 +39,11 @@ int send_money(const char *addr, long long amount);
 /* send some money to the target contract */
 int send_money_to_contract(const char *addr, long long amount);
 
+/* test libsnark */
+int test_libsnark(int input_x);
+
+/* test zk in vote */
+int vote_zk_init(void);
+int vote_zk_verify(void);
+
 #endif // BITCOIN_CONTRACT_OURCONTRACT_H

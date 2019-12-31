@@ -12,8 +12,6 @@
 
 #include "ourcontract.h"
 
-#define PATH_MAX 4096
-
 /* entry of call stack */
 typedef struct _frame {
     const char *name;
@@ -25,8 +23,6 @@ typedef struct _frame {
 
 /* call stack */
 static frame *curr_frame = NULL;
-FILE *in;
-FILE *out;
 
 static void push(const char *name)
 {
@@ -85,13 +81,10 @@ int start_runtime(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    in = fdopen(fileno(stdin), "rb");
-    out = fdopen(fileno(stdout), "wb");
-
-    return run_contract(argv[2], argc - 2, argv + 2);
+    return call_contract(argv[2], argc - 2, argv + 2);
 }
 
-int run_contract(const char *contract, int argc, char **argv)
+int call_contract(const char *contract, int argc, char **argv)
 {
     char filename[PATH_MAX];
     if (snprintf(filename, PATH_MAX, "%s/%s/code.so", get_contracts_dir(), contract) >= PATH_MAX) {
@@ -117,24 +110,6 @@ int run_contract(const char *contract, int argc, char **argv)
 
     dlclose(handle);
     return ret;
-}
-
-int call_contract(const char *contract, int argc, char **argv)
-{
-    if (strlen(contract) != 64) {
-        return -1;
-    }
-    int flag = BYTE_CALL_CONTRACT;
-    fwrite((void *) &flag, sizeof(int), 1, out);
-    fwrite((void *) contract, sizeof(char), 64, out);
-    fwrite((void *) &argc, sizeof(int), 1, out);
-
-    int i;
-    for (i = 0; i < argc; i++) {
-        int argLen = strlen(argv[i]);
-        fwrite((void *) &argLen, sizeof(int), 1, out);
-        fwrite((void *) argv[i], sizeof(char), argLen, out);
-    }
 }
 
 int err_printf(const char *format, ...)
@@ -190,14 +165,6 @@ static int out_close()
         err_printf("out_close: fclose failed\n");
         return -1;
     }
-    if (fclose(in) == EOF) {
-        err_printf("out_close: fclose failed\n");
-        return -1;
-    }
-    if (fclose(out) == EOF) {
-        err_printf("out_close: fclose failed\n");
-        return -1;
-    }
     return 0;
 }
 
@@ -227,37 +194,153 @@ int out_clear()
     return 0;
 }
 
+static int state_open(int flags)
+{
+    char filename[PATH_MAX];
+    if (snprintf(filename, PATH_MAX, "%s/%s/state",
+                 get_contracts_dir(), curr_frame->name) >= PATH_MAX) {
+        err_printf("state_open: path too long\n");
+        return -1;
+    }
+
+    curr_frame->state_fd = open(filename, flags, 0664);
+    if (curr_frame->state_fd == -1) {
+        err_printf("state_open: open failed\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int state_close()
+{
+    if (close(curr_frame->state_fd) == -1) {
+        err_printf("state_close: close failed\n");
+        return -1;
+    }
+    return 0;
+}
+
 int state_read(void *buf, int count)
 {
-    int flag = BYTE_READ_STATE;
-    fwrite((void *) &flag, sizeof(int), 1, out);
-    return fread(buf, 1, count, in);
+    if (curr_frame->state_fd == -1) {
+        if (state_open(O_RDONLY) == -1) return -1;
+    } else if ((fcntl(curr_frame->state_fd, F_GETFL) & O_ACCMODE) != O_RDONLY) {
+        if (state_close() == -1) return -1;
+        if (state_open(O_RDONLY) == -1) return -1;
+    }
+
+    return read(curr_frame->state_fd, buf, count);
 }
 
 int state_write(const void *buf, int count)
 {
-    fwrite((void *) &count, sizeof(int), 1, out);
-    return fwrite(buf, 1, count, out);
+    if (curr_frame->state_fd == -1) {
+        if (state_open(O_WRONLY | O_CREAT) == -1) return -1;
+    } else if ((fcntl(curr_frame->state_fd, F_GETFL) & O_ACCMODE) != O_WRONLY) {
+        if (state_close() == -1) return -1;
+        if (state_open(O_WRONLY | O_CREAT) == -1) return -1;
+    }
+
+    return write(curr_frame->state_fd, buf, count);
 }
 
-int send_money(const char *addr, long long amount)
-{
-    if (strlen(addr) > 40) return -1;
-    if (amount < 0) return -1;
-    int flag = BYTE_SEND_TO_ADDRESS;
-    fwrite((void *) &flag, sizeof(int), 1, out);
-    fwrite((void *) addr, sizeof(char), 40, out);
-    fwrite((void *) &amount, sizeof(long long), 1, out);
+int test_libsnark(int input_x) {
+    char *libPath;
+    libPath = getenv("OURZKLIB");
+
+    void *handle = dlopen(libPath, RTLD_LAZY);
+    if (handle == NULL) {
+        err_printf("test_libsnark: dlopen failed\n");
+        return EXIT_FAILURE;
+    }
+
+    int (*call_function)(int) = dlsym(handle, "test_libsnark");
+    if (call_function == NULL) {
+        err_printf("test_libsnark: %s\n", dlerror());
+        return EXIT_FAILURE;
+    }
+
+    push("test_libsnark");
+    int ret = call_function(input_x);
+    pop();
+
+    dlclose(handle);
+    return ret;
+}
+
+int vote_zk_init(void) {
+	char *libPath;
+    libPath = getenv("OURZKLIB");
+
+    void *handle = dlopen(libPath, RTLD_LAZY);
+    if (handle == NULL) {
+        err_printf("vote_zk_init: dlopen failed\n");
+        return EXIT_FAILURE;
+    }
+
+    void (*call_function)(char*, char*) = dlsym(handle, "vote_zk_init");
+    if (call_function == NULL) {
+        err_printf("vote_zk_init: %s\n", dlerror());
+        return EXIT_FAILURE;
+    }
+
+    char proving_key_filename[PATH_MAX];
+    if (snprintf(proving_key_filename, PATH_MAX, "%s/%s/proving_key",
+                 get_contracts_dir(), curr_frame->name) >= PATH_MAX) {
+        err_printf("state_open: path too long\n");
+        return -1;
+    }
+
+    char verify_key_filename[PATH_MAX];
+    if (snprintf(verify_key_filename, PATH_MAX, "%s/%s/verify_key",
+                 get_contracts_dir(), curr_frame->name) >= PATH_MAX) {
+        err_printf("state_open: path too long\n");
+        return -1;
+    }
+
+    push("vote_zk_init");
+    call_function(proving_key_filename, verify_key_filename);
+    pop();
+
+    dlclose(handle);
     return 0;
 }
 
-int send_money_to_contract(const char *addr, long long amount)
-{
-    if (strlen(addr) > 64) return -1;
-    if (amount < 0) return -1;
-    int flag = BYTE_SEND_TO_CONTRACT;
-    fwrite((void *) &flag, sizeof(int), 1, out);
-    fwrite((void *) addr, sizeof(char), 64, out);
-    fwrite((void *) &amount, sizeof(long long), 1, out);
-    return 0;
+int vote_zk_verify(void) {
+	char *libPath;
+    libPath = getenv("OURZKLIB");
+
+    void *handle = dlopen(libPath, RTLD_LAZY);
+    if (handle == NULL) {
+        err_printf("vote_zk_verify: dlopen failed\n");
+        return EXIT_FAILURE;
+    }
+
+    int (*call_function)(char*, char*) = dlsym(handle, "vote_zk_verify");
+    if (call_function == NULL) {
+        err_printf("vote_zk_verify: %s\n", dlerror());
+        return EXIT_FAILURE;
+    }
+
+    char proof_filename[PATH_MAX];
+    if (snprintf(proof_filename, PATH_MAX, "%s/%s/proof",
+                 get_contracts_dir(), curr_frame->name) >= PATH_MAX) {
+        err_printf("state_open: path too long\n");
+        return -1;
+    }
+
+    char verify_key_filename[PATH_MAX];
+    if (snprintf(verify_key_filename, PATH_MAX, "%s/%s/verify_key",
+                 get_contracts_dir(), curr_frame->name) >= PATH_MAX) {
+        err_printf("state_open: path too long\n");
+        return -1;
+    }
+
+    push("vote_zk_verify");
+    int ret = call_function(verify_key_filename, proof_filename);
+    pop();
+
+    dlclose(handle);
+    return ret;
 }

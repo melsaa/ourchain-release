@@ -1,0 +1,3 @@
+[submodule "zk-tool"]
+	path = zk-tool
+	url = https://github.com/strongshih/zk-tool.git
