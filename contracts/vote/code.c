@@ -37,22 +37,13 @@ static int check_user(int index, const char *signature)
 
 static int sign_up(const char *name, const char *pubkey)
 {
-    if (state.is_freezed == 1) {
-        err_printf("State is freezed.\n");
-        return -1;
-    }
+    if (state.is_freezed == 1) return -1;
 
     /* already signed up */
-    if (find_user(name) != -1) {
-        err_printf("Already signed up.\n");
-        return -1;
-    }
+    if (find_user(name) != -1) return -1;
 
     /* number of users reaches upper bound */
-    if (state.user_count == 100) {
-        err_printf("Number of users reaches upper bound.\n");
-        return -1;
-    }
+    if (state.user_count == 100) return -1;
 
     str_printf(state.users[state.user_count].name, 50, "%s", name);
     str_printf(state.users[state.user_count].pubkey, 50, "%s", pubkey);

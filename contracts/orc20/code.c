@@ -430,7 +430,10 @@ static unsigned int readState()
     offset += readAccountArray(buff, offset);
     offset += readAllowanceArray(buff, offset);
 
-    assert(offset == count);
+    if (offset != count) {
+        err_printf("offset = %u  count = %u\n", offset, count);
+        assert(offset == count);
+    }
     return offset;
 }
 
