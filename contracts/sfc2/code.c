@@ -1,5 +1,9 @@
+#define __USE_XOPEN // strptime
+#define _GNU_SOURCE // strptime
+
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include <ourcontract.h>
 #include "orc20.h"
 
@@ -8,6 +12,13 @@
 #define MAX_LOANS 1000
 // Oracle is an agent that supplies a convertion rate between ORC20 and NTD
 #define ORACLE_ADDR "0xOracleAddress"
+
+// safe_math functions
+uint64_t safeAdd(uint64_t x, uint64_t y);
+uint64_t safeSubtract(uint64_t x, uint64_t y);
+uint64_t safeMult(uint64_t x, uint64_t y);
+uint64_t min(uint64_t a, uint64_t b);
+uint64_t max(uint64_t a, uint64_t b);
 
 typedef struct { 
     char x[50];
@@ -27,6 +38,8 @@ typedef struct {
     uint64_t _amount;
 } AddressDesc;
 
+// We assume that buyer won't delay payments
+// And borrower won't deliver product late
 typedef struct {
     Status status;
     //Oracle oracle; // an agent that supplies a convertion rate between ORC20 and NTD
@@ -34,22 +47,24 @@ typedef struct {
     address buyer;
     address lender;
     // address cosigner; // insurance company
+    uint64_t borrowerCredit;
+    uint64_t buyerCredit;
 
     uint64_t amount;
     uint64_t lendPercentage; // percentage of production cost
+    uint64_t lentAmount;
     uint64_t interest;
-    uint64_t punitoryInterest;
+    double interestRate;
+    char paymentDate[10]; // YYYYMMDD
+    char earlyPaymentDate[10]; // YYYYMMDD
+    
     char productReceived; // 1 or -1
     char paid; // 1 or -1
-    uint64_t interestRate;
-    uint64_t interestRatePunitory;
-    uint64_t duesIn; // yyyy/mm/dd format
 
-    uint64_t lentAmount;
     address approvedTransfer;
     char approvedByBuyer; // 1 or -1
 
-    char* metadata; // contract & order list
+    char metadata[100]; // hashed contract & order list
 } Loan;
 
 typedef struct {
@@ -204,29 +219,60 @@ static unsigned int writeState()
     return offset;
 }
 
+/*
+ * Source: https://www.scfbriefing.com/the-key-to-unlocking-the-potential-of-supply-chain-finance/
+ * days = paymentDate - earlyPaymentDate
+ * interest = interestRate * (amount * lendPercentage) * days / 360
+ */
+uint64_t calculateInterest(Loan loan) {
+    double seconds;
+    uint64_t interest;
+    uint days;
+    struct tm ltm1 = {0};
+    struct tm ltm2 = {0};
+
+    strptime(loan.paymentDate, "%Y%m%d", &ltm1);
+    strptime(loan.earlyPaymentDate, "%Y%m%d", &ltm2);
+    seconds = difftime(mktime(&ltm1), mktime(&ltm2));
+    days = seconds / 86400;
+    
+    interest = max(loan.interestRate * loan.amount * loan.lendPercentage * days / 3600000, 1);
+
+    return interest;
+}
+
+uint64_t calculateLentAmount(Loan loan) {
+    uint64_t lentAmount;
+
+    lentAmount = (loan.amount * loan.lendPercentage / 100) - loan.interest;
+
+    return lentAmount;
+}
+
 uint64_t borrower_create_loan(char* _borrower,
                               char* _buyer,
                               uint64_t _amount,
                               uint64_t _percentage,
                               uint64_t _interestRate,
-                              uint64_t _interestRatePunitory, 
-                              uint64_t _duesIn,
+                              char* _paymentDate, 
+                              char* _earlyPaymentDate,
                               char* _metadata) {
     Loan loan;
     loan.status = initial;
     loan.borrower = address_new(_borrower);
     loan.buyer = address_new(_buyer);
-    loan.lender = address_new("0");
+    loan.lender = address_new("0x0");
     loan.amount = _amount;
     loan.lendPercentage = _percentage;
     loan.interestRate = _interestRate;
-    loan.interestRatePunitory = _interestRatePunitory;
-    loan.duesIn = _duesIn;
-    loan.lentAmount = 0;
+    strcpy(loan.paymentDate, _paymentDate);
+    strcpy(loan.earlyPaymentDate, _earlyPaymentDate);
+    loan.interest = calculateInterest(loan);
+    loan.lentAmount = calculateLentAmount(loan);
     loan.approvedByBuyer = -1;
-    loan.metadata = malloc(strlen(_metadata)+1);
+    loan.productReceived = -1;
+    loan.paid = -1;
     strcpy(loan.metadata, _metadata);
-    err_printf("metadata %s\n", loan.metadata);
 
     uint64_t index = state.activeLoans;
     state.loans[state.activeLoans++] = loan;
@@ -237,23 +283,26 @@ uint64_t borrower_create_loan(char* _borrower,
 uint64_t public_print_loan(uint64_t index) {
     if (index < state.activeLoans) {
         Loan loan = state.loans[index];
-        err_printf("Loan #%d\n", index);
+        err_printf("\nLoan #%d\n", index);
         err_printf("====================================\n");
         err_printf("Status               : ");
         if (loan.status == initial) err_printf("initial\n");
         else if (loan.status == lent) err_printf("lent\n");
         else if (loan.status == paid) err_printf("paid\n");
         else if (loan.status == destroyed) err_printf("destroyed\n");
-        err_printf("Borrower             : %x\n", loan.borrower);
-        err_printf("Buyer                : %x\n", loan.buyer);
-        err_printf("Lender               : %x\n", loan.lender);
+        err_printf("Borrower             : %s\n", loan.borrower.x);
+        err_printf("Buyer                : %s\n", loan.buyer.x);
+        err_printf("Lender               : %s\n", loan.lender.x);
         err_printf("Amount               : %d\n", loan.amount);
         err_printf("LendPercentage       : %d\n", loan.lendPercentage);
-        err_printf("InterestRate         : %d\n", loan.interestRate);
-        err_printf("InterestRatePunitory : %d\n", loan.interestRatePunitory);
         err_printf("LentAmount           : %d\n", loan.lentAmount);
-        err_printf("DuesIn               : %d\n", loan.duesIn);
+        err_printf("InterestRate         : %f\n", loan.interestRate);
+        err_printf("Interest             : %d\n", loan.interest);
+        err_printf("PaymentDate          : %s\n", loan.paymentDate);
+        err_printf("EarlyPaymentDate     : %s\n", loan.earlyPaymentDate);
         err_printf("ApprovedByBuyer      : %d\n", loan.approvedByBuyer);
+        err_printf("IsProductReceived    : %d\n", loan.productReceived);
+        err_printf("IsLoanPaid           : %d\n", loan.paid);
         return 1;
     }
     return -1;
@@ -271,44 +320,60 @@ uint64_t buyer_print_loan(uint64_t index, char* _buyer) {
 }
 
 uint64_t buyer_approveLoan(uint64_t index, char* _buyer) {
-    Loan loan = state.loans[index];
-    if (loan.status == initial && !strcmp(loan.buyer.x, _buyer)) {
-        loan.approvedByBuyer = 1;
+    Loan *loan = &state.loans[index];
+    if (loan->status == initial && !strcmp(loan->buyer.x, _buyer)) {
+        loan->approvedByBuyer = 1;
         return 1;
     }
     return -1;
 }
 
 uint64_t lender_approve_provideLoan(uint64_t index, char* _lender, uint64_t _lentAmount) {
-    Loan loan = state.loans[index];
-    if (loan.status == initial && !strcmp(loan.lender.x, "0")) {
-        if (loan.approvedByBuyer) {
-            strcpy(loan.lender.x, _lender);
-            loan.lentAmount = _lentAmount;
-            loan.status = lent;
-            if (transfer(loan.lender.x, loan.borrower.x, loan.lentAmount) == 0) {
+    Loan *loan = &state.loans[index];
+    if (loan->status == initial && !strcmp(loan->lender.x, "0x0") && _lentAmount == loan->lentAmount) {
+        if (loan->approvedByBuyer) {
+            strcpy(loan->lender.x, _lender);
+            loan->status = lent;
+            if (transfer(loan->lender.x, loan->borrower.x, loan->lentAmount) == 0) {
                 return 1;
+            } else {
+                err_printf("Transfer failed\n");
             }
+        } else {
+            err_printf("Contract hasn't been approved by buyer\n");
         }
+    } else {
+        err_printf("lentAmount should be %d\n", loan->lentAmount);
     }
     return -1;
 }
 
 uint64_t borrower_withdrawLoan(uint64_t index, char* _borrower) {
-    Loan loan = state.loans[index];
-    if (loan.status == lent && !strcmp(loan.borrower.x, _borrower)) {
-        if (approve(loan.lender.x, loan.borrower.x, loan.lentAmount) == 0) {
+    Loan *loan = &state.loans[index];
+    if (loan->status == lent && !strcmp(loan->borrower.x, _borrower)) {
+        if (approve(loan->lender.x, loan->borrower.x, loan->lentAmount) == 0) {
             return 1;
         }
     }
     return -1;
 }
 
+uint64_t buyer_checkProductReceived(uint64_t index, char *_buyer) {
+    Loan *loan = &state.loans[index];
+    if (loan->status == lent && !strcmp(loan->buyer.x, _buyer) && loan->productReceived == -1) {
+        loan->productReceived = 1;
+        return 1;
+    }
+    return -1;
+}
+
 uint64_t buyer_payLoan(uint64_t index, char* _buyer, uint64_t _amount) {
-    Loan loan = state.loans[index];
-    if (loan.status == lent && !strcmp(loan.buyer.x, _buyer)) {
-        loan.status = paid;
-        if (transfer(loan.buyer.x, loan.lender.x, _amount) == 0) {
+    Loan *loan = &state.loans[index];
+    if (loan->status == lent && !strcmp(loan->buyer.x, _buyer) && _amount == loan->amount
+        && loan->productReceived == 1) {
+        loan->status = paid;
+        loan->paid = 1;
+        if (transfer(loan->buyer.x, loan->lender.x, _amount) == 0) {
             return 1;
         }
     }
@@ -373,6 +438,7 @@ int contract_main(int argc, char** argv)
                 err_printf("%s: user_sign_up failed\n", argv[0]);
                 return -1;
             }
+            err_printf("userSignUp:%d\n", ret);
         } else if (!strcmp(argv[1], "lender_sign_up")) {
             if (argc != 3) {
                 err_printf("%s: usage: sfc2 lender_sign_up user_address\n", argv[0]);
@@ -383,18 +449,19 @@ int contract_main(int argc, char** argv)
                 err_printf("%s: lender_sign_up failed\n", argv[0]);
                 return -1;
             }
+            err_printf("lenderSignUp:%d\n", ret);
         } else if (!strcmp(argv[1], "balanceOf")) {
             if (argc < 3) {
                 err_printf("%s: usage: scf2 balanceOf user_address\n", argv[0]);
                 return -1;
             }
-            err_printf("balanceOf:%d\n", balanceOf(argv[2]));
+            err_printf("balanceOf %s:%d\n", argv[2], balanceOf(argv[2]));
         } else if (!strcmp(argv[1], "createLoan")) {
             if (argc != 10) {
-                err_printf("%s: usage: scf2 createLoan borrower_address buyer_address amount lendPercentage interestRate interestRatePunitory duesIn metadata\n", argv[0]);
+                err_printf("%s: usage: scf2 createLoan borrower_address buyer_address amount lendPercentage interestRate paymentDate (YYYYMMDD) earlyPaymentDate(YYYYMMDD) metadata\n", argv[0]);
                 return -1;
             }
-            err_printf("createLoan:%d\n", borrower_create_loan(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), argv[9]));
+            err_printf("createLoan:%d\n", borrower_create_loan(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), argv[7], argv[8], argv[9]));
         } else if (!strcmp(argv[1], "printLoan")) {
             if (argc != 3) {
                 err_printf("%s: usage: scf2 printLoan loan_index\n", argv[0]);
@@ -431,6 +498,12 @@ int contract_main(int argc, char** argv)
                 return -1;
             }
             err_printf("buyerPayLoan:%d\n", buyer_payLoan(atoi(argv[2]), argv[3], atoi(argv[4])));
+        } else if (!strcmp(argv[1], "buyerCheckProductReceived")) {
+            if (argc != 4) {
+                err_printf("%s: usage: scf2 buyerCheckProductReceived loan_index buyer_address\n");
+                return -1;
+            }
+            err_printf("buyerCheckProductReceived:%d\n", buyer_checkProductReceived(atoi(argv[2]), argv[3]));
         } else if (!strcmp(argv[1], "allowance")) {
             if (argc < 4) {
                 err_printf("%s: usage: scf2 allowance token_owner_address spender_address\n", argv[0]);
@@ -452,6 +525,7 @@ int contract_main(int argc, char** argv)
             if (success == -1) {
                 err_printf("Are you a lender?\n");
             }
+            err_printf("lender_buyToken:%d\n", success);
         } else if (!strcmp(argv[1], "sellToken")) {
             return 0;
         } else {
@@ -464,4 +538,38 @@ int contract_main(int argc, char** argv)
     }
 
     return 0;
+}
+
+uint64_t safeAdd(uint64_t x, uint64_t y) {
+    uint64_t z = x + y;
+    assert((z >= x) && (z >= y));
+    return z;
+}
+
+uint64_t safeSubtract(uint64_t x, uint64_t y) {
+    assert(x >= y);
+    uint64_t z = x - y;
+    return z;
+}
+
+uint64_t safeMult(uint64_t x, uint64_t y) {
+    uint64_t z = x * y;
+    assert((x == 0) || (z/x == y));
+    return z;
+}
+
+uint64_t min(uint64_t a, uint64_t b) {
+    if (a < b) {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+uint64_t max(uint64_t a, uint64_t b) {
+    if (a > b) {
+        return a;
+    } else {
+        return b;
+    }
 }
