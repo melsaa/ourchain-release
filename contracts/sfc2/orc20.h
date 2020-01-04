@@ -178,7 +178,7 @@ int balanceOf(char* requester_address)
 
     if (requester_account == NULL) {
         err_printf("%s account not found\n", requester_address);
-        return 0;
+        return 1;
     }
     return requester_account->balance;
 }
@@ -190,22 +190,22 @@ int allowance(char* token_owner_address, char* spender_address)
 
     if (token_owner_account == NULL) {
         err_printf("%s account not found\n", token_owner_address);
-        return 0;
+        return -1;
     } else if (spender_account == NULL) {
         err_printf("%s account not found\n", spender_address);
-        return 0;
+        return -1;
     }
 
     Allowance* token_owner_allowance = findAllowance(token_owner_account);
     if (token_owner_allowance == NULL) {
         err_printf("%s allowance not found\n", token_owner_address);
-        return 0;
+        return -1;
     }
 
     AllowanceRecord* record = findAllowanceRecord(token_owner_allowance, spender_account);
     if (record == NULL) {
         err_printf("%s allowance not found\n", spender_address);
-        return 0;
+        return -1;
     }
 
     return record->amount;
@@ -248,7 +248,7 @@ int approve(char* token_owner_address, char* spender_address, int amount)
         record->amount = amount;
     }
 
-    return 0;
+    return 1;
 }
 
 int transfer(char* msg_sender_address, char* to_address ,int amount)
@@ -270,7 +270,7 @@ int transfer(char* msg_sender_address, char* to_address ,int amount)
     if (msg_sender_account->balance >= amount && amount > 0) {
         to_account->balance += amount;
         msg_sender_account->balance -= amount;
-        return 0;
+        return 1;
     }
 
     err_printf("insufficient funds\n");
@@ -297,7 +297,7 @@ int transferFrom(char* msg_sender_address, char* token_onwer_address, char* to_a
         //appendToAccountArray(createAccount(to_address));
         //to_account = findAccount(to_address);
     }
-
+    
     int allowance_value = allowance(token_onwer_address, msg_sender_address);
 
     if (token_owner_account->balance >= amount
@@ -310,7 +310,7 @@ int transferFrom(char* msg_sender_address, char* token_onwer_address, char* to_a
         record->amount -= amount;
         to_account->balance += amount;
 
-        return 0;
+        return 1;
     }
 
     return -1;
